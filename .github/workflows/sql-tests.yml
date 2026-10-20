@@ -1,0 +1,94 @@
+name: Enterprise Data Warehouse SQL Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test-postgresql:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: portfolio
+          POSTGRES_PASSWORD: portfolio_test
+          POSTGRES_DB: warehouse
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U portfolio -d warehouse"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: portfolio
+      PGPASSWORD: portfolio_test
+      PGDATABASE: warehouse
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Create dimensional schema
+        run: psql -v ON_ERROR_STOP=1 -f 01_create_schema.sql
+
+      - name: Load synthetic sample data
+        run: psql -v ON_ERROR_STOP=1 -f 02_insert_sample_data.sql
+
+      - name: Execute advanced analytics queries
+        run: psql -v ON_ERROR_STOP=1 -f 03_advanced_analytics.sql
+
+      - name: Validate data quality
+        run: |
+          psql -v ON_ERROR_STOP=1 -At -f 04_data_quality_checks.sql > quality_results.txt
+          if [ -s quality_results.txt ]; then
+            echo "Data quality checks found issues:"
+            cat quality_results.txt
+            exit 1
+          fi
+          echo "All data quality checks passed."
+
+      - name: Validate expected transaction totals
+        run: |
+          psql -v ON_ERROR_STOP=1 <<'SQL'
+          DO $$
+          BEGIN
+            IF (SELECT COUNT(*) FROM dim_customer) <> 4 THEN
+              RAISE EXCEPTION 'Unexpected customer count';
+            END IF;
+            IF (SELECT COUNT(*) FROM fact_transactions) <> 8 THEN
+              RAISE EXCEPTION 'Unexpected transaction count';
+            END IF;
+            IF (SELECT COUNT(*) FROM fact_transactions
+                WHERE transaction_status = 'COMPLETED') <> 6 THEN
+              RAISE EXCEPTION 'Unexpected completed transaction count';
+            END IF;
+            IF (SELECT SUM(f.amount)
+                FROM fact_transactions f
+                JOIN dim_account a ON a.account_key = f.account_key
+                WHERE f.transaction_status = 'COMPLETED'
+                  AND a.currency_code = 'ARS') <> 5450.00 THEN
+              RAISE EXCEPTION 'Unexpected ARS total';
+            END IF;
+            IF (SELECT SUM(f.amount)
+                FROM fact_transactions f
+                JOIN dim_account a ON a.account_key = f.account_key
+                WHERE f.transaction_status = 'COMPLETED'
+                  AND a.currency_code = 'USD') <> 5800.00 THEN
+              RAISE EXCEPTION 'Unexpected USD total';
+            END IF;
+          END
+          $$;
+          SQL
+          echo "Expected transaction totals validated."
